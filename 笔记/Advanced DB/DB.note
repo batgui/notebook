@@ -1,0 +1,109 @@
+数据库关系系统被创建之初，硬件设施是很简陋的，当时的CPU只有一核，RAM严重不足，数据库需要被存在硬盘中去，并且访问硬盘的速度极其的慢，当时数据库很大一部分都是在做将数据从硬盘和内存之间来回移动的工作。
+
+但是现在DRAM的存储空间越来越大，许多数据库都可以直接被放进内存中去（除了数据仓库等等）
+
+Disk-oriented DBMS:数据库的主要存贮地方是非易失性存储器（non-volatile storage）比如磁盘或者固态硬盘。
+
+当系统需要读取数据的时候，DB总是假定数据不在内存中，而在磁盘中，DB需要从磁盘中拿数据。
+
+数据库在磁盘中由固定大小的slotted pages组成，pages里面包含存入的数据（tuple）。
+
+当数据从磁盘中取出的时候，我们先把数据放在in-memory buffer poll中缓存起来。
+
+in-memory buffer pool是数据库直接操作的对象，我们对buffer pool处理过后，数据才会被写到磁盘中。
+
+buffer pool负责数据在磁盘和内存之间的移动。
+
+当query需要访问一个page时，DBMS先检查看看这个page是否已经在内存中，如果不在,DBMS就把数据从磁盘中取出来，拷贝到buffer pool中。如果buffer pool满了，DBMS需要回收pages。如果回收的pages是脏的，DBMS需要把这个page写到磁盘中。当page在内存中的时候，DMBS返回指向内存中pages的指针。
+【图片】
+
+如上图所示，假设我们做一次数据库查询，我们搜索索引来找到一个特定的数据（tuple），我们遍历索引的B+树到叶子节点，我们得到一个指向page id和slot number的指针。然后我们根据page id查找page table。
+
+page table： page id -> frame(in buffer pool)
+
+假设page table里面没有我们需要的page id，并且page table满了，那么此时我们需要做两件事，一个是在page table中回收一个pages，然后从硬盘中把需要的数据拿到buffer pool中去，在做这个操作的时候我们需要对page table上锁，保证不出现竞争条件。同时对于回收的那条page 我们也需要上锁，保证在回收过程中没人操作它。	最后我们更新page table的数据，令page id指向新数据。
+
+传统的Disk-oriented DBMS有很多缺点，比如说每次DB要访问数据的时候，一定要经过buffer pool manager把数据从硬盘拿到内存中去，这个过程很慢（需要加锁防止竞争）。并且每次访问数据的时候都要经过page table把page id转化为buffer pool里面的数据。
+
+在传统的Disk-oriented DBMS,系统假定当一个transaction访问不在内存中的数据时会随时暂停。所以在这个过程中需要加锁来保证数据库的[ACID](https://en.wikipedia.org/wiki/ACID_(computer_science))特性。这些（放在内存中的）加锁信息被存储在另外的数据结构中，用来记录哪条transaction对哪条数据加什么类型的锁。
+
+对于in-memory DBMS 数据库的锁和数据存储在一起，不需要去另外的数据结构中查看加锁信息。
+
+日志和恢复机制：STEAL + NO-FORCE policy.
+STEAL的意思是被没有commit的transaction修改的page可以被写入硬盘，反之NO-STEAL就是不被允许写入硬盘。FORCE的意思是当transaction被commited后，buffer pool里面的所有dirty pages都要被flush到硬盘中，反之NO-FORCE就是不用flush到硬盘中。数据库通过写前日志（WAL）来实现这个机制。
+
+可以从下图看到，Disk oriented DB真正有用的工作只占CPU 7%的工作时间，大部分时间都花在buffer pool还有加锁的过程中。
+{图片}
+这就引出了in-memory DBMS。in-memory DBMS假定数据存储在内存中的。
+
+in-memory DBMS 将数据以block的形式组织起来，并把定长的数据和不定长的数据分开存储。
+{图片}
+如上图所示当我们想要访问一条数据时，我们从遍历index得到数据的block id和offset，我们可以用id和offset直接找到我们想到的数据。
+
+in-memory database 把锁和数据存在一起，可以更快的判断数据有没有上锁。而disk-oriented databse把锁和数据分开来存。
+
+B+树在in-memory DB中仍然是建立索引比较不错的数据结构。与disk oriented DB不同的是，in-memory database不会将更新索引的log写入到磁盘中，而是在计算机重启后从硬盘中载入整个数据库的时候重新建立索引，而disk oriented DB在更新数据的时候会将更新索引的log写入到磁盘中，来减少数据库恢复所需要的时间。
+
+和disk oriented DB不同，顺序扫描比随机扫描快不了多少，并且tuple-at-a-time iterator model不适用，因为函数调用overhead太多会导致速度很慢。
+in-memory DB也需要写前日志（WAL），但需要记录的东西少很多，比如说不需要记录redo操作和LSN。为了加快恢复速度，in-memory DB也需要不定时的对数据库进行checkpoint操作。
+
+--------------------------------------------------------
+
+数据库工作负载有主要分为两种：
+
+在线事务处理（OLTP）:每次只读取或更新数据库的一小部分，比如说用户去淘宝购物，用户只能对自己的购物车或者地址进行操作，这些操作只会涉及到很小的一部分数据。
+在线分析处理（OLAP）:和OLTP不同的是，OLAP会对数据库的大量数据进行操作，例如进行连接或聚合运算，比如说淘宝会对大量的用户数据进行分析，来帮助淘宝进行商业决策，更好的为用户服务。
+近几年出现了混合事务+分析处理（HATP）的数据库，在HATP数据库中既可以进行OLTP操作，又可以进行OLAP操作，避免了资源的浪费。
+
+如下图所示是常见的企业配置数据库的方式，公司用前端的OLTP数据库来进行事务处理，一个公司可以有好几个OLTP数据库。当公司想要对这几个OLTP数据库内的数据进行分析的时候，公司需要把数据从OLTP数据库拿出来，进行提取转换加载（ETL）操作，该操作会对数据进行清洗以及转换，把数据格式统一起来加载到后端的OLAP数据库中。然后在OLAP数据库中进行分析操作，必要的时候OLAP数据库还会给OLTP数据库返回计算的结果。以淘宝为例，淘宝在前端用OLTP收集用户的物品点击信息，在后端OLAP数据库中计算用户可能感兴趣的物品，将这个物品返回给前端OLTP数据库，以便用户下次访问的时候将这个物品呈现给用户。
+{图片}
+
+HTAP数据库允许了某些只能运行在后端OLAP数据库的操作运行在前端OLTP数据库中，减少了数据从 OLTP DB-->ETL-->OLAP DB -->OLTP DB 之间传输的时间，但是HTAP不能取代ETL。
+
+数据库事务（Transaction简称为Txn）：
+Transaction是数据库管理系统执行过程中的一个逻辑单位，由一个有限的数据库操作序列构成。---维基百科
+
+Transaction Model：
+Flat Txns:
+Flat Txns我们现在所说的transaction大多指的是Txns。Flat Txns以BEGIN开头，后面跟着一系列操作，最后以COMMIT或者ROLLBACK结束。
+如下图所示，Txn #1以BEGIN开头，紧接着对A进行读取，对B进行写操作，最后COMMIT，表明B被永久写入数据库中了， Txn #2在对B进行写操作之后ROLLBACK，表明对B的写操作会回滚，B不会被写入数据库中。
+{图片}
+Flat Txns的缺点：当数据库需要rollback的时候，需要rollback这个transaction的所有操作，当数据库在进行transaction的时候崩溃了，所有对数据库的写操作都会丢失。比如说银行需要对大量用户数据进行更新，使用FLAT Txns会花费大量的时间更新数据，若这时数据库崩溃或冲突所有操作都会丢失。
+
+
+Flat Txns+ Savepoints：
+为了解决Flat Txns的这个缺点，我们可以给DB加savepoint，savepoint保存了transaction当前的状态，允许用户访问这个状态。
+用户可以用ROLLBACK命令回滚到某个savepoint，用RELEASE来摧毁某个savepoint。
+如下图所示，Txn #1在BEGIN语句执行时候自动生成一个new savepoint，然后对这个savepoint写入A。
+{图片}
+在执行命令savepoint 1的时候将new savepoint重命名为savepoint 1。然后生成一个新的savepoint：new savepoint用来保存之后的操作。
+{图片}
+在运行WRITE(B)的时候将B写入new savepoint中。当执行ROLLBACK To 1的时候，会把刚刚创建的savepoint删掉，重新建立一个new savepoint用来保存之后需要写入的C。所以当最后COMMIT的时候A和C会写入数据库中，B不会。
+{图片}
+
+Nested Txns
+Nested Txns是在进行transaction的时候调用了其他transaction，子transaction的结果取决于父transaction。我们用下面这个例子看一下。
+{图片}
+如上图所示，Txn #1在执行的时候调用了Sub-Txn #1.1,然后Sub-Txn #1.1又调用了Sub-Txn #1.1.1。因为在Sub-Txn #1.1最末尾进行了ROLLBACK，所以Sub-Txn #1.1.1和Sub-Txn #1.1的所有操作都无效。因此当Txn #1COMMIT的时候只有A被写入数据库中。
+
+
+
+Chained Txns：
+Chained Txns是一个接一个的连续执行多个transactions，这些transactions之间的COMMIT和BEGIN操作是原子性的（atomic）。 与savepoint不同的是，在一个transaction COMMIT之后数据库可以释放这个transaction的锁，并且transaction COMMIT后不能ROLLBACK。
+如下图所示，Txn #1在执行COMMIT命令后将A写入数据库中，Txn #2在执行COMMIT命令后将B写入数据库中，Txn #3在进行WRITE(C)操作后，即使进行了ROLLBACK也只对C有效，A和B不受影响。
+{图片}
+若想逆转已经COMMIT的transaction的结果，我们需要Compensating Txn。
+Compensating Txns：
+Compensating Txn具有以逆转已经COMMIT的transaction的功能。
+把Chained Txns和Compensating Txn加在一起，就是Saga Txns。
+Saga Txns：
+Saga Txns由一系列Chained TxnsT1-Tn和Compensating TxnsC1-Cn−1组成。这些transaction将会以T1,. . .Tj,Cj. . .C1 (其中j < n)的顺序进行COMMIT。Saga Txns允许数据库支持长时间运行的，多步的transaction。
+
+如下图所示，假设Txn #1，Txn #2，Txn #3是Chained Txns，在运行Txn #3的时候程序中断，若此时什么都不处理则Txn #1和#2的的产物A + 1和B + 1仍然会被写入数据库中。
+{图片}
+Saga Txns会继续运行Compensating Txns，从后往前逆转已经COMMIT的transactions的操作。
+{图片}
+目前没有数据库内在支持Chained Txns和Saga Txns，支持他们的大多是编程框架，特别是微服务（micro services）。因为微服务每次通常只会更新很小的数据，通过使用Saga Txns我们可以安全的对大量的微服务进行更新。
+
+
+------------------------------------
